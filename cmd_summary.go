@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 	"time"
-	"token-monitor/model"
-	"token-monitor/parser"
+	"github.com/jlisicki/claude-token-monitor/model"
+	"github.com/jlisicki/claude-token-monitor/parser"
 )
 
 func runSummary(path string) {

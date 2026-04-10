@@ -7,8 +7,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"token-monitor/model"
-	"token-monitor/watcher"
+	"github.com/jlisicki/claude-token-monitor/model"
+	"github.com/jlisicki/claude-token-monitor/watcher"
 
 	"golang.org/x/term"
 )

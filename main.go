@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-	"token-monitor/tui"
-	"token-monitor/watcher"
+	"github.com/jlisicki/claude-token-monitor/tui"
+	"github.com/jlisicki/claude-token-monitor/watcher"
 
 	tea "github.com/charmbracelet/bubbletea"
 

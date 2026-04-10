@@ -1,4 +1,4 @@
-# token-monitor
+# claude-token-monitor
 
 Real-time token usage and cost tracker for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
@@ -7,14 +7,14 @@ Reads Claude Code's JSONL session files and displays per-request token breakdown
 ## Install
 
 ```bash
-go install github.com/user/token-monitor@latest
+go install github.com/jlisicki/claude-token-monitor@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/user/token-monitor.git
-cd token-monitor
+git clone https://github.com/jlisicki/claude-token-monitor.git
+cd claude-token-monitor
 go build
 ```
 

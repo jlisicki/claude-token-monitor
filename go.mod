@@ -1,4 +1,4 @@
-module token-monitor
+module github.com/jlisicki/claude-token-monitor
 
 go 1.25.0
 

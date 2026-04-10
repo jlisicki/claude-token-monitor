@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"token-monitor/model"
+	"github.com/jlisicki/claude-token-monitor/model"
 )
 
 type contentBlock struct {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"token-monitor/model"
+	"github.com/jlisicki/claude-token-monitor/model"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"

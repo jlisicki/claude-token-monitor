@@ -8,9 +8,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"token-monitor/model"
-	"token-monitor/parser"
-	"token-monitor/watcher"
+	"github.com/jlisicki/claude-token-monitor/model"
+	"github.com/jlisicki/claude-token-monitor/parser"
+	"github.com/jlisicki/claude-token-monitor/watcher"
 )
 
 // recordKey stores records per session+agentID for full granularity.
