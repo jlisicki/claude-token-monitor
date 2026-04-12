@@ -12,25 +12,32 @@ import (
 )
 
 type Watcher struct {
-	dir      string
-	verbose  bool
-	debug    bool
-	records  chan []model.TokenRecord
-	offsets  map[string]int64
-	mu       sync.Mutex
-	done     chan struct{}
+	dir        string
+	verbose    bool
+	debug      bool
+	streamAll  bool                    // when true, emit intermediates too (for tail streaming display)
+	records    chan []model.TokenRecord
+	offsets    map[string]int64
+	pending    map[string]*pendingMsg // buffered intermediate entries, keyed by agentID:msgID
+	mu         sync.Mutex
+	done       chan struct{}
 }
 
 func New(dir string, verbose bool, debug bool) *Watcher {
 	return &Watcher{
-		dir:     dir,
-		verbose: verbose,
-		debug:   debug,
-		records: make(chan []model.TokenRecord, 100),
-		offsets: make(map[string]int64),
-		done:    make(chan struct{}),
+		dir:        dir,
+		verbose:    verbose,
+		debug:      debug,
+		records:    make(chan []model.TokenRecord, 100),
+		offsets:    make(map[string]int64),
+		pending:    make(map[string]*pendingMsg),
+		done:       make(chan struct{}),
 	}
 }
+
+// SetStreamAll enables pass-through of intermediate streaming entries.
+// Must be called before Start.
+func (w *Watcher) SetStreamAll(v bool) { w.streamAll = v }
 
 func (w *Watcher) Records() <-chan []model.TokenRecord {
 	return w.records
@@ -50,11 +57,16 @@ func (w *Watcher) InitialScan() (*model.Summary, error) {
 		}
 		w.mu.Lock()
 		w.offsets[f] = offset
+		recs = w.mergeStreamingEntries(recs)
 		w.mu.Unlock()
 		for _, r := range recs {
 			summary.Add(r)
 		}
 	}
+	// Clear pending buffer — historical state is no longer needed.
+	w.mu.Lock()
+	w.pending = make(map[string]*pendingMsg)
+	w.mu.Unlock()
 	return summary, nil
 }
 
@@ -77,6 +89,81 @@ func (w *Watcher) SeekToEnd() error {
 	return nil
 }
 
+const pendingTTL = 1 * time.Minute
+
+// pendingMsg buffers intermediate streaming entries until the final entry arrives.
+type pendingMsg struct {
+	contentTypes []string
+	firstSeen    time.Time
+}
+
+// mergeStreamingEntries filters records so that only the final entry per API
+// response (identified by stop_reason != "") is emitted, with content types
+// merged from all entries.  Intermediate entries are buffered in w.pending.
+// Must be called with w.mu held.
+func (w *Watcher) mergeStreamingEntries(recs []model.TokenRecord) []model.TokenRecord {
+	now := time.Now()
+
+	// Prune expired pending entries to bound memory.
+	for key, p := range w.pending {
+		if now.Sub(p.firstSeen) > pendingTTL {
+			delete(w.pending, key)
+		}
+	}
+
+	out := recs[:0]
+	for _, r := range recs {
+		if r.Role != "assistant" || r.MessageID == "" {
+			out = append(out, r)
+			continue
+		}
+
+		key := r.AgentID + ":" + r.MessageID
+		p, exists := w.pending[key]
+
+		if r.StopReason == "" {
+			// Intermediate entry — buffer content type, don't emit.
+			if !exists {
+				p = &pendingMsg{firstSeen: now}
+				w.pending[key] = p
+			}
+			if r.ContentType != "" {
+				p.contentTypes = append(p.contentTypes, r.ContentType)
+			}
+			continue
+		}
+
+		// Final entry — merge buffered content types and emit.
+		if exists {
+			all := append(p.contentTypes, r.ContentType)
+			r.ContentType = mergeContentTypes(all)
+			delete(w.pending, key)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// mergeContentTypes deduplicates and joins content type strings.
+func mergeContentTypes(types []string) string {
+	seen := make(map[string]bool)
+	var merged []string
+	for _, t := range types {
+		if t != "" && !seen[t] {
+			seen[t] = true
+			merged = append(merged, t)
+		}
+	}
+	result := ""
+	for i, t := range merged {
+		if i > 0 {
+			result += "+"
+		}
+		result += t
+	}
+	return result
+}
+
 func (w *Watcher) processFile(path string) {
 	w.mu.Lock()
 	offset := w.offsets[path]
@@ -89,6 +176,9 @@ func (w *Watcher) processFile(path string) {
 
 	w.mu.Lock()
 	w.offsets[path] = newOffset
+	if !w.streamAll {
+		recs = w.mergeStreamingEntries(recs)
+	}
 	w.mu.Unlock()
 
 	if len(recs) > 0 {

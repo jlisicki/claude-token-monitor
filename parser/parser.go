@@ -24,6 +24,7 @@ type jsonLine struct {
 	CWD       string `json:"cwd"`
 	AgentID   string `json:"agentId"`
 	Message   *struct {
+		ID      string         `json:"id"`
 		Model   string         `json:"model"`
 		Content []contentBlock `json:"content"`
 		Usage   *struct {
@@ -36,6 +37,7 @@ type jsonLine struct {
 				Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
 			} `json:"cache_creation"`
 		} `json:"usage"`
+		StopReason *string `json:"stop_reason"`
 	} `json:"message"`
 }
 
@@ -76,6 +78,13 @@ func rawLineIf(line []byte, keep bool) string {
 		return string(line)
 	}
 	return ""
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func ParseLine(line []byte) *model.TokenRecord {
@@ -135,6 +144,8 @@ func parseLine(line []byte, keepRaw bool) *model.TokenRecord {
 		AgentID:             jl.AgentID,
 		Project:             projectFromCWD(jl.CWD),
 		RawLine:             rawLineIf(line, keepRaw),
+		MessageID:           jl.Message.ID,
+		StopReason:          derefStr(jl.Message.StopReason),
 	}
 }
 
@@ -193,6 +204,86 @@ func parseVerboseLine(line []byte, keepRaw bool) *model.TokenRecord {
 	}
 }
 
+// dedup merges multiple JSONL entries from the same API response into one record.
+//
+// Claude Code logs one entry per content block as it streams.  Intermediate
+// entries have stop_reason=null and carry partial output_tokens; only the final
+// entry (stop_reason != "") has the correct total.  We keep only the final
+// entry per message.id, merging content types from all entries so the display
+// shows e.g. "thinking+text+tool_use".
+func dedup(records []model.TokenRecord) []model.TokenRecord {
+	type group struct {
+		finalIdx     int
+		contentTypes []string
+	}
+	// Keyed by agentID:messageID to avoid collisions between main and subagents.
+	groups := make(map[string]*group)
+
+	for i := range records {
+		r := &records[i]
+		if r.Role != "assistant" || r.MessageID == "" {
+			continue
+		}
+		key := r.AgentID + ":" + r.MessageID
+		g, ok := groups[key]
+		if !ok {
+			g = &group{finalIdx: -1}
+			groups[key] = g
+		}
+		if r.ContentType != "" {
+			g.contentTypes = append(g.contentTypes, r.ContentType)
+		}
+		if r.StopReason != "" {
+			g.finalIdx = i
+		}
+	}
+
+	// Mark which indices to keep (final entries + non-assistant records).
+	keep := make([]bool, len(records))
+	for i := range records {
+		r := &records[i]
+		if r.Role != "assistant" || r.MessageID == "" {
+			keep[i] = true
+			continue
+		}
+		key := r.AgentID + ":" + r.MessageID
+		g := groups[key]
+		if g.finalIdx == i {
+			// Merge content types from all entries in this group.
+			r.ContentType = mergeContentTypes(g.contentTypes)
+			keep[i] = true
+		}
+		// If no final entry exists yet (shouldn't happen in complete files),
+		// keep the last entry as fallback.
+		if g.finalIdx == -1 {
+			keep[i] = true
+			g.finalIdx = i
+		}
+	}
+
+	out := records[:0]
+	for i, r := range records {
+		if keep[i] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// mergeContentTypes deduplicates and joins content type strings.
+// Input: ["thinking", "text", "tool_use", "tool_use"] → "thinking+text+tool_use"
+func mergeContentTypes(types []string) string {
+	seen := make(map[string]bool)
+	var merged []string
+	for _, t := range types {
+		if t != "" && !seen[t] {
+			seen[t] = true
+			merged = append(merged, t)
+		}
+	}
+	return strings.Join(merged, "+")
+}
+
 func ParseFile(path string) ([]model.TokenRecord, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -211,7 +302,7 @@ func ParseReader(r io.Reader) ([]model.TokenRecord, error) {
 			records = append(records, *rec)
 		}
 	}
-	return records, scanner.Err()
+	return dedup(records), scanner.Err()
 }
 
 // ParseFileFromOffset reads new lines from offset, returns records and new offset.

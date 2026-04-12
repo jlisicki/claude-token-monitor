@@ -24,6 +24,8 @@ type TokenRecord struct {
 	ContentType         string
 	ContentSize         int
 	RawLine             string
+	MessageID           string // API message ID (msg_...), shared across content blocks from one response
+	StopReason          string // "end_turn", "tool_use", or "" for intermediate streaming entries
 }
 
 type ModelPricing struct {

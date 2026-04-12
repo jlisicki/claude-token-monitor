@@ -259,8 +259,24 @@ func (ch *compactHint) detectCompaction(r model.TokenRecord) {
 	}
 }
 
+// streamingState tracks the in-flight message being displayed so it can be
+// updated in-place as new content blocks stream in.
+type streamingState struct {
+	key          string   // agentID:messageID
+	linesPrinted int      // terminal lines occupied by current display
+	contentTypes []string // accumulated content types from intermediates
+}
+
+// eraseLines moves the cursor up n lines and clears them.
+func eraseLines(n int) {
+	for i := 0; i < n; i++ {
+		fmt.Print("\033[A\033[2K")
+	}
+}
+
 func runTail(path string, debug bool, verbose bool, history bool) {
 	w := watcher.New(path, verbose, debug)
+	w.SetStreamAll(true) // receive intermediates for live streaming display
 
 	var summary *model.Summary
 	if history {
@@ -283,6 +299,7 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 	linesSinceHeader := 0
 	var costSum float64
 	hints := newCompactHint()
+	var streaming *streamingState
 
 	if history {
 		printHeaderWithSummary("history", summary)
@@ -296,9 +313,30 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
+	quit := make(chan struct{})
+	if restore, err := enableKeypress(int(os.Stdin.Fd())); err == nil {
+		defer restore()
+		go func() {
+			buf := make([]byte, 1)
+			for {
+				if _, err := os.Stdin.Read(buf); err != nil {
+					return
+				}
+				if buf[0] == 'q' || buf[0] == 'Q' {
+					close(quit)
+					return
+				}
+			}
+		}()
+	}
+
 	for {
 		select {
 		case <-sig:
+			fmt.Println()
+			printFinalSummary(summary, session)
+			return
+		case <-quit:
 			fmt.Println()
 			printFinalSummary(summary, session)
 			return
@@ -308,6 +346,8 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 			}
 			for _, r := range recs {
 				if r.Role != "assistant" {
+					// Non-assistant record breaks any in-place streaming.
+					streaming = nil
 					printVerboseRecord(r)
 					linesSinceHeader++
 					if debug {
@@ -316,6 +356,39 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 					}
 					continue
 				}
+
+				key := r.AgentID + ":" + r.MessageID
+				isFinal := r.StopReason != ""
+
+				if r.MessageID != "" && !isFinal {
+					// Intermediate streaming entry.
+					if streaming != nil && streaming.key == key {
+						// Update in place — erase previous lines and reprint.
+						eraseLines(streaming.linesPrinted)
+						linesSinceHeader -= streaming.linesPrinted
+					} else {
+						// New streaming message (or different message).
+						streaming = &streamingState{key: key}
+					}
+					streaming.contentTypes = appendContentType(streaming.contentTypes, r.ContentType)
+					r.ContentType = mergeContentTypes(streaming.contentTypes)
+					lines := printStreamingRecord(r)
+					streaming.linesPrinted = lines
+					linesSinceHeader += lines
+					continue
+				}
+
+				// Final entry (or record without MessageID).
+				if streaming != nil && streaming.key == key {
+					// Replace streaming display with final version.
+					eraseLines(streaming.linesPrinted)
+					linesSinceHeader -= streaming.linesPrinted
+					// Merge content types from intermediates.
+					all := appendContentType(streaming.contentTypes, r.ContentType)
+					r.ContentType = mergeContentTypes(all)
+				}
+				streaming = nil
+
 				summary.Add(r)
 				session.Add(r)
 				lineCount++
@@ -348,6 +421,87 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 			}
 		}
 	}
+}
+
+// compactContentType condenses a merged content type to fit the 8-char TYPE
+// column.  Thinking is dropped when other types are present (it's already
+// visible in the THINK token column).
+func compactContentType(ct string) string {
+	switch ct {
+	case "thinking+text+tool_use", "text+tool_use":
+		return "txt+tool"
+	case "thinking+text":
+		return "text"
+	case "thinking+tool_use":
+		return "tool_use"
+	default:
+		return ct
+	}
+}
+
+func appendContentType(types []string, ct string) []string {
+	if ct == "" {
+		return types
+	}
+	for _, t := range types {
+		if t == ct {
+			return types
+		}
+	}
+	return append(types, ct)
+}
+
+// mergeContentTypes joins content type strings, deduplicating.
+func mergeContentTypes(types []string) string {
+	result := ""
+	for i, t := range types {
+		if i > 0 {
+			result += "+"
+		}
+		result += t
+	}
+	return result
+}
+
+// printStreamingRecord prints a record with a streaming indicator.
+// Returns the number of terminal lines printed.
+func printStreamingRecord(r model.TokenRecord) int {
+	ts := formatTime(r.Timestamp)
+	norm := model.NormalizeModelName(r.Model)
+
+	modelColor := white
+	switch norm {
+	case "opus":
+		modelColor = magenta
+	case "sonnet":
+		modelColor = blue
+	case "haiku":
+		modelColor = green
+	}
+
+	proj := truncate(r.Project, wProj)
+	projC := projectColor(r.Project)
+	ct := truncate(compactContentType(r.ContentType), wType)
+
+	agentStr := "main"
+	agentColor := dim
+	if r.AgentID != "" {
+		agentStr = "sub"
+		agentColor = cyan
+	}
+
+	marker := yellow + "⟳" + reset
+
+	fmt.Printf("%s%s %s%s%s %s%s%s %s %s %s%s…%s\n",
+		marker,
+		pad(ts, wTime),
+		projC, pad(proj, wProj), reset,
+		modelColor, pad(norm, wModel), reset,
+		agentColor+pad(agentStr, wAgent)+reset,
+		pad(ct, wType),
+		dim, "streaming", reset,
+	)
+	return 1
 }
 
 func printHeaderWithSummary(label string, s *model.Summary) {
@@ -387,7 +541,7 @@ func printRecordWithCosts(r model.TokenRecord, costs model.RecordCosts, expensiv
 
 	proj := truncate(r.Project, wProj)
 	projC := projectColor(r.Project)
-	ct := truncate(r.ContentType, wType)
+	ct := truncate(compactContentType(r.ContentType), wType)
 
 	agentStr := "main"
 	agentColor := dim
@@ -413,7 +567,6 @@ func printRecordWithCosts(r model.TokenRecord, costs model.RecordCosts, expensiv
 		marker = red + "▶" + reset
 		totalColor = red + bold
 	}
-
 	// Row 1: metadata + token counts + total tokens
 	fmt.Printf("%s%s %s%s%s %s%s%s %s %s %s %s %s %s %s %s %s\n",
 		marker,
