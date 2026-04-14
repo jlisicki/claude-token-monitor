@@ -262,9 +262,10 @@ func (ch *compactHint) detectCompaction(r model.TokenRecord) {
 // streamingState tracks the in-flight message being displayed so it can be
 // updated in-place as new content blocks stream in.
 type streamingState struct {
-	key          string   // agentID:messageID
-	linesPrinted int      // terminal lines occupied by current display
-	contentTypes []string // accumulated content types from intermediates
+	key          string            // agentID:messageID
+	linesPrinted int              // terminal lines occupied by current display
+	contentTypes []string          // accumulated content types from intermediates
+	lastRecord   model.TokenRecord // last displayed record, for reprinting
 }
 
 // eraseLines moves the cursor up n lines and clears them.
@@ -346,13 +347,24 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 			}
 			for _, r := range recs {
 				if r.Role != "assistant" {
-					// Non-assistant record breaks any in-place streaming.
-					streaming = nil
+					if streaming != nil {
+						// Erase the streaming line, print this record,
+						// then reprint the streaming line so it stays at the
+						// bottom and can still be replaced by the final.
+						eraseLines(streaming.linesPrinted)
+						linesSinceHeader -= streaming.linesPrinted
+					}
 					printVerboseRecord(r)
 					linesSinceHeader++
 					if debug {
 						printDebug(r)
 						linesSinceHeader++
+					}
+					if streaming != nil {
+						// Reprint the streaming line at the bottom.
+						lines := printStreamingRecord(streaming.lastRecord)
+						streaming.linesPrinted = lines
+						linesSinceHeader += lines
 					}
 					continue
 				}
@@ -374,6 +386,7 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 					r.ContentType = mergeContentTypes(streaming.contentTypes)
 					lines := printStreamingRecord(r)
 					streaming.linesPrinted = lines
+					streaming.lastRecord = r
 					linesSinceHeader += lines
 					continue
 				}
