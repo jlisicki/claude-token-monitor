@@ -380,6 +380,11 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 						linesSinceHeader -= streaming.linesPrinted
 					} else {
 						// New streaming message (or different message).
+						// Erase the old streaming line if switching messages.
+						if streaming != nil {
+							eraseLines(streaming.linesPrinted)
+							linesSinceHeader -= streaming.linesPrinted
+						}
 						streaming = &streamingState{key: key}
 					}
 					streaming.contentTypes = appendContentType(streaming.contentTypes, r.ContentType)
@@ -392,15 +397,22 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 				}
 
 				// Final entry (or record without MessageID).
-				if streaming != nil && streaming.key == key {
+				matched := streaming != nil && streaming.key == key
+				if matched {
 					// Replace streaming display with final version.
 					eraseLines(streaming.linesPrinted)
 					linesSinceHeader -= streaming.linesPrinted
 					// Merge content types from intermediates.
 					all := appendContentType(streaming.contentTypes, r.ContentType)
 					r.ContentType = mergeContentTypes(all)
+					streaming = nil
+				} else if streaming != nil {
+					// Non-matching final: erase the streaming line,
+					// print the final below, then reprint streaming
+					// at the bottom so it stays erasable.
+					eraseLines(streaming.linesPrinted)
+					linesSinceHeader -= streaming.linesPrinted
 				}
-				streaming = nil
 
 				summary.Add(r)
 				session.Add(r)
@@ -430,6 +442,14 @@ func runTail(path string, debug bool, verbose bool, history bool) {
 				if debug {
 					printDebug(r)
 					linesSinceHeader++
+				}
+
+				// Reprint the streaming line at the bottom if it
+				// was temporarily removed for a non-matching record.
+				if !matched && streaming != nil {
+					sl := printStreamingRecord(streaming.lastRecord)
+					streaming.linesPrinted = sl
+					linesSinceHeader += sl
 				}
 			}
 		}
